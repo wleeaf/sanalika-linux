@@ -1,0 +1,7 @@
+.DS_Store
+*.swf
+*.exe
+*.dmg
+*.zip
+__pycache__/
+
