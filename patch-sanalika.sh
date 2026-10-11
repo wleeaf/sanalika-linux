@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly PATCH_VERSION="0.1.0"
+readonly PATCH_VERSION="0.2.0"
 readonly FFDEC_VERSION="26.2.1"
 readonly FFDEC_URL="https://github.com/jindrapetrik/jpexs-decompiler/releases/download/version26.2.1/ffdec_26.2.1.zip"
 readonly EXPECTED_FFDEC_HASH="0333b56998a55bd83f4e0deb678a811fcdc45607582b4f5dd438309c8c3ad5ce"
-readonly REMOTE_LOADER_URL="https://fs.sanalika.com/global/dynamic/core/ml.3"
-readonly REMOTE_CORE_URL="https://fs.sanalika.com/global/dynamic/core/snl.770.swf"
+readonly CLIENT_CONFIG_URL="https://cf.sanalika.com/c.json"
 readonly EXPECTED_MAIN_HASH="675e74272f4d0ec9dc9bb4f0bc41edbb832b31f2089287e274ac021f0301ae29"
-readonly EXPECTED_LOADER_HASH="740a56a2abd02018d9cd9a79e58d9c258afcef6ddd629420bb4b3a7bf0c9ce7d"
-readonly EXPECTED_CORE_HASH="ea3496429d3b428c73c5c8d9282fdc30a83bb358601c27f45f8b0e80988bcc72"
 
 project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 user_home=${HOME:?HOME is not set}
@@ -26,6 +23,7 @@ fail() {
 usage() {
     printf 'Usage: %s [Sanalika application directory]\n' "$(basename "$0")"
     printf '\nThe directory must contain Sanalika.exe and Sanalika.swf.\n'
+    printf 'Run it again whenever Sanalika publishes a new loader.\n'
 }
 
 [[ "${1:-}" != "--help" ]] || { usage; exit 0; }
@@ -59,12 +57,13 @@ application_xml="$app_dir/META-INF/AIR/application.xml"
 [[ -f "$main_swf" ]] || fail "missing $main_swf"
 [[ -f "$application_xml" ]] || fail "missing $application_xml"
 
-current_main_hash=$(hash_file "$main_swf")
-if [[ -f "$app_dir/ml-patched.swf" ]] && [[ -f "$app_dir/core-patched.swf" ]] && grep -q '<renderMode>cpu</renderMode>' "$application_xml" && [[ "$current_main_hash" != "$EXPECTED_MAIN_HASH" ]]; then
-    printf 'Sanalika is already patched (sanalika-linux %s).\n' "$PATCH_VERSION"
-    exit 0
+# Always rebuild from the official client so the script can be re-run after updates.
+main_source="$main_swf"
+if [[ "$(hash_file "$main_swf")" != "$EXPECTED_MAIN_HASH" && -f "$main_swf.original" ]]; then
+    main_source="$main_swf.original"
 fi
-[[ "$current_main_hash" == "$EXPECTED_MAIN_HASH" ]] || fail "unsupported Sanalika.swf hash ($current_main_hash); this release targets client 1.0.1.1"
+current_main_hash=$(hash_file "$main_source")
+[[ "$current_main_hash" == "$EXPECTED_MAIN_HASH" ]] || fail "unsupported Sanalika.swf hash ($current_main_hash); this release targets clients 1.0.1.1 and 1.0.1.2"
 
 mkdir -p "$cache_root"
 ffdec_root="$cache_root/ffdec-$FFDEC_VERSION"
@@ -83,20 +82,21 @@ if [[ ! -x "$ffdec" ]]; then
 fi
 [[ -x "$ffdec" ]] || fail "JPEXS Free Flash Decompiler was not unpacked correctly"
 
+# The preloader is published by Sanalika and changes with server updates, so
+# always use the one the live client configuration points to. The game core is
+# not stored locally: the patched preloader downloads the current one at launch.
+client_config="$work_dir/c.json"
+curl --fail --location --retry 3 --silent --show-error "$CLIENT_CONFIG_URL" -o "$client_config" || fail "could not download the Sanalika client configuration"
+remote_loader_url=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["loader"])' "$client_config") || fail "the Sanalika client configuration has no loader URL"
+[[ "$remote_loader_url" == https://*.sanalika.com/* ]] || fail "unexpected loader URL: $remote_loader_url"
+
 remote_root="$cache_root/remote-swf"
 mkdir -p "$remote_root"
-remote_loader="$remote_root/ml.3"
-remote_core="$remote_root/snl.770.swf"
+remote_loader="$remote_root/$(basename -- "$remote_loader_url")"
 if [[ ! -f "$remote_loader" ]]; then
-    curl --fail --location --retry 3 --silent --show-error "$REMOTE_LOADER_URL" -o "$remote_loader.part"
+    curl --fail --location --retry 3 --silent --show-error "$remote_loader_url" -o "$remote_loader.part"
     mv -- "$remote_loader.part" "$remote_loader"
 fi
-if [[ ! -f "$remote_core" ]]; then
-    curl --fail --location --retry 3 --silent --show-error "$REMOTE_CORE_URL" -o "$remote_core.part"
-    mv -- "$remote_core.part" "$remote_core"
-fi
-[[ "$(hash_file "$remote_loader")" == "$EXPECTED_LOADER_HASH" ]] || fail "the remote preloader version is not supported"
-[[ "$(hash_file "$remote_core")" == "$EXPECTED_CORE_HASH" ]] || fail "the remote core version is not supported"
 
 patch_swf() {
     local kind=$1
@@ -105,45 +105,33 @@ patch_swf() {
     local source_root="$work_dir/$kind-source"
     mkdir -p "$source_root"
     printf 'Exporting %s scripts...\n' "$kind"
-    "$ffdec" -format script:as -export script "$source_root" "$input" >/dev/null
-    python3 "$project_dir/patches/patch_sources.py" --kind "$kind" "$source_root"
+    "$ffdec" -format script:as -export script "$source_root" "$input" >/dev/null || return 1
+    python3 "$project_dir/patches/patch_sources.py" --kind "$kind" "$source_root" || return 1
     case "$kind" in
         main) target_script='scripts/com/oyunstudyosu/air/model/LoaderModel.as' ;;
         preloader) target_script='scripts/extensions/MainLoader.as' ;;
-        core) target_script='scripts/com/oyunstudyosu/commands/InitParamsCommand.as' ;;
     esac
-    if [[ "$kind" == core ]]; then
-        find "$source_root" -type f -name '*.as' ! -path "$source_root/$target_script" ! -path '*/com/oyunstudyosu/video/youtube/YoutubePlayer.as' -delete
-    else
-        find "$source_root" -type f -name '*.as' ! -path "$source_root/$target_script" -delete
-    fi
+    find "$source_root" -type f -name '*.as' ! -path "$source_root/$target_script" -delete || return 1
     printf 'Rebuilding %s...\n' "$kind"
-    if [[ "$kind" == core ]]; then
-        "$ffdec" -air -importScript "$input" "$output" "$source_root" >/dev/null
-    else
-        "$ffdec" -importScript "$input" "$output" "$source_root" >/dev/null
-    fi
+    "$ffdec" -importScript "$input" "$output" "$source_root" >/dev/null
 }
 
 main_output="$work_dir/Sanalika.swf"
 loader_output="$work_dir/ml-patched.swf"
-core_output="$work_dir/core-patched.swf"
-patch_swf main "$main_swf" "$main_output"
-patch_swf preloader "$remote_loader" "$loader_output"
-patch_swf core "$remote_core" "$core_output"
+patch_swf main "$main_source" "$main_output"
+patch_swf preloader "$remote_loader" "$loader_output" || fail "the current Sanalika preloader ($remote_loader_url) is not supported by this patch"
 
-[[ -s "$main_output" && -s "$loader_output" && -s "$core_output" ]] || fail "JPEXS produced an empty rebuilt SWF"
+[[ -s "$main_output" && -s "$loader_output" ]] || fail "JPEXS produced an empty rebuilt SWF"
 
 backup_once "$main_swf"
 backup_once "$application_xml"
-[[ -f "$app_dir/ml-patched.swf" ]] && backup_once "$app_dir/ml-patched.swf"
-[[ -f "$app_dir/core-patched.swf" ]] && backup_once "$app_dir/core-patched.swf"
 
 cp -p -- "$main_output" "$main_swf"
 cp -p -- "$loader_output" "$app_dir/ml-patched.swf"
-cp -p -- "$core_output" "$app_dir/core-patched.swf"
+# Older releases shipped a pinned local core; the live one is used now.
+rm -f -- "$app_dir/core-patched.swf"
 perl -0pi -e 's#<renderMode>gpu</renderMode>#<renderMode>cpu</renderMode>#' "$application_xml"
 grep -q '<renderMode>cpu</renderMode>' "$application_xml" || fail "could not enable CPU rendering in application.xml"
-printf 'sanalika-linux=%s\nclient=1.0.1.1\n' "$PATCH_VERSION" > "$app_dir/.sanalika-linux-version"
+printf 'sanalika-linux=%s\nloader=%s\n' "$PATCH_VERSION" "$remote_loader_url" > "$app_dir/.sanalika-linux-version"
 
 printf '\nSanalika patched successfully.\nApplication directory: %s\n' "$app_dir"

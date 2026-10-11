@@ -12,7 +12,7 @@ fail() {
 }
 
 usage() {
-    printf 'Usage: %s /path/to/Sanalika_1.0.1.1.exe\n' "$(basename "$0")"
+    printf 'Usage: %s /path/to/Sanalika_1.0.1.2.exe\n' "$(basename "$0")"
 }
 
 [[ "${1:-}" != "--help" ]] || { usage; exit 0; }
