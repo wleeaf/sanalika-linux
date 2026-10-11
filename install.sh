@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-project_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 user_home=${HOME:?HOME is not set}
 prefix="${SANALIKA_WINEPREFIX:-${XDG_DATA_HOME:-$user_home/.local/share}/wineprefixes/sanalika}"
-installer=${1:-}
+installer=""
+cpu_rendering=0
 
 fail() {
     printf 'Error: %s\n' "$1" >&2
@@ -12,25 +12,31 @@ fail() {
 }
 
 usage() {
-    printf 'Usage: %s /path/to/Sanalika_1.0.1.2.exe\n' "$(basename "$0")"
+    printf 'Usage: %s [--cpu-rendering] [/path/to/Sanalika_1.0.1.2.exe]\n' "$(basename "$0")"
+    printf '\n  --cpu-rendering  use software rendering if the game window is black or glitchy\n'
 }
 
-[[ "${1:-}" != "--help" ]] || { usage; exit 0; }
-[[ $# -le 1 ]] || { usage >&2; exit 2; }
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --help) usage; exit 0 ;;
+        --cpu-rendering) cpu_rendering=1 ;;
+        -*) usage >&2; exit 2 ;;
+        *) [[ -z "$installer" ]] || { usage >&2; exit 2; }; installer=$1 ;;
+    esac
+    shift
+done
 
-if [[ -z "$installer" ]]; then
-    mapfile -t installers < <(find "$user_home/Downloads" -maxdepth 1 -type f -iname 'Sanalika*.exe' -print 2>/dev/null | sort)
-    [[ ${#installers[@]} -eq 1 ]] || fail "pass the official Sanalika installer path explicitly"
-    installer=${installers[0]}
-fi
-[[ -f "$installer" ]] || fail "installer not found: $installer"
-installer=$(cd -- "$(dirname -- "$installer")" && pwd)/$(basename -- "$installer")
+find_mingw_dll() {
+    local name=$1
+    # find exits non-zero on unreadable directories even when it found the file.
+    find /usr -type f -name "$name" -path '*/i686-w64-mingw32/*' -print -quit 2>/dev/null || true
+}
 
 install_packages() {
     local -a sudo_cmd=()
     [[ $EUID -eq 0 ]] || { command -v sudo >/dev/null 2>&1 || fail "sudo is required to install system dependencies"; sudo_cmd=(sudo); }
     if command -v dnf >/dev/null 2>&1; then
-        local -a packages=(wine mingw32-libgcc mingw32-winpthreads java-17-openjdk-headless unzip curl python3 perl)
+        local -a packages=(wine mingw32-libgcc mingw32-winpthreads)
         local -a missing=()
         local package
         for package in "${packages[@]}"; do
@@ -41,39 +47,34 @@ install_packages() {
         fi
     elif command -v apt-get >/dev/null 2>&1; then
         "${sudo_cmd[@]}" apt-get update
-        "${sudo_cmd[@]}" apt-get install -y wine mingw-w64 default-jre-headless unzip curl python3 perl
+        "${sudo_cmd[@]}" apt-get install -y wine mingw-w64
     elif command -v pacman >/dev/null 2>&1; then
-        "${sudo_cmd[@]}" pacman -Sy --needed wine mingw-w64-gcc jre17-openjdk unzip curl python perl
+        "${sudo_cmd[@]}" pacman -Sy --needed wine mingw-w64-gcc
     else
-        fail "unsupported package manager; install wine, MinGW runtime DLLs, Java, unzip, curl, Python 3, and Perl manually"
+        fail "unsupported package manager; install Wine and the 32-bit MinGW runtime DLLs manually"
     fi
 }
 
-missing_command=0
-for command in wine curl unzip java python3 sha256sum perl; do
-    command -v "$command" >/dev/null 2>&1 || missing_command=1
-done
-runtime_missing=0
+dependencies_missing=0
+command -v wine >/dev/null 2>&1 || dependencies_missing=1
 for dll in libgcc_s_dw2-1.dll libwinpthread-1.dll; do
-    find /usr -type f -name "$dll" -path '*/i686-w64-mingw32/*' -print -quit 2>/dev/null | grep -q . || runtime_missing=1
+    [[ -n "$(find_mingw_dll "$dll")" ]] || dependencies_missing=1
 done
-if [[ "$missing_command" -eq 1 || "$runtime_missing" -eq 1 ]]; then
-    install_packages
-fi
-for command in wine curl unzip java python3 sha256sum perl; do
-    command -v "$command" >/dev/null 2>&1 || fail "'$command' is still unavailable after dependency installation"
-done
+[[ "$dependencies_missing" -eq 0 ]] || install_packages
+command -v wine >/dev/null 2>&1 || fail "Wine is still unavailable after dependency installation"
 
 mkdir -p "$prefix"
 if [[ ! -d "$prefix/drive_c" ]]; then
     printf 'Initializing Wine prefix...\n'
-    WINEPREFIX="$prefix" wineboot -u >/dev/null 2>&1
+    # Sanalika is an AIR app and needs neither Wine Mono nor Gecko; skipping
+    # them avoids install prompts that can block or abort prefix creation.
+    if ! WINEPREFIX="$prefix" WINEDLLOVERRIDES="mscoree,mshtml=" timeout 300 wineboot -u >/dev/null 2>&1; then
+        WINEPREFIX="$prefix" wineserver -k >/dev/null 2>&1 || true
+        rm -rf -- "$prefix"
+        fail "Wine prefix initialization failed or timed out; run the installer again"
+    fi
+    WINEPREFIX="$prefix" wineserver -w
 fi
-
-find_mingw_dll() {
-    local name=$1
-    find /usr -type f -name "$name" -path '*/i686-w64-mingw32/*' -print -quit 2>/dev/null
-}
 
 for dll in libgcc_s_dw2-1.dll libwinpthread-1.dll; do
     dll_source=$(find_mingw_dll "$dll")
@@ -86,14 +87,30 @@ done
 
 mapfile -t installed_apps < <(find "$prefix/drive_c" -type f -iname 'Sanalika.exe' -printf '%h\n' 2>/dev/null | sort -u)
 if [[ ${#installed_apps[@]} -eq 0 ]]; then
-    printf 'Opening the official Sanalika installer...\n'
-    WINEPREFIX="$prefix" wine "$installer"
+    if [[ -z "$installer" ]]; then
+        mapfile -t installers < <(find "$user_home/Downloads" -maxdepth 1 -type f -iname 'Sanalika*.exe' -print 2>/dev/null | sort -V)
+        [[ ${#installers[@]} -gt 0 ]] || fail "download the official Sanalika installer and pass its path"
+        installer=${installers[-1]}
+    fi
+    [[ -f "$installer" ]] || fail "installer not found: $installer"
+    printf 'Installing Sanalika silently from %s...\n' "$(basename -- "$installer")"
+    # The NSIS installer can exit non-zero under Wine even after a complete
+    # install, so success is judged by the installed files below.
+    WINEPREFIX="$prefix" WINEDLLOVERRIDES="winemenubuilder.exe=d" timeout 600 wine "$installer" /S >/dev/null 2>&1 || true
+    WINEPREFIX="$prefix" wineserver -w
     mapfile -t installed_apps < <(find "$prefix/drive_c" -type f -iname 'Sanalika.exe' -printf '%h\n' 2>/dev/null | sort -u)
 fi
-[[ ${#installed_apps[@]} -eq 1 ]] || fail "could not uniquely locate the installed Sanalika application"
+[[ ${#installed_apps[@]} -eq 1 ]] || fail "Sanalika was not installed; run the installer again or check that the .exe is the official one"
 app_dir=${installed_apps[0]}
 
-"$project_dir/patch-sanalika.sh" "$app_dir"
+if [[ "$cpu_rendering" -eq 1 ]]; then
+    application_xml="$app_dir/META-INF/AIR/application.xml"
+    [[ -f "$application_xml" ]] || fail "missing $application_xml"
+    [[ -e "$application_xml.original" ]] || cp -p -- "$application_xml" "$application_xml.original"
+    sed -i 's#<renderMode>gpu</renderMode>#<renderMode>cpu</renderMode>#' "$application_xml"
+    grep -q '<renderMode>cpu</renderMode>' "$application_xml" || fail "could not enable CPU rendering in application.xml"
+    printf 'CPU rendering enabled.\n'
+fi
 
 launcher_dir="$user_home/.local/bin"
 launcher="$launcher_dir/sanalika-linux"
