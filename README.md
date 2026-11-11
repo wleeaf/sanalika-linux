@@ -36,12 +36,19 @@ Options are saved in `~/.local/share/sanalika-linux/settings`. Sanalika's update
 |---|---|---|
 | `--cpu-rendering` | Software rendering. Smoother on some setups (for example, no frame drops when switching desktops) and fixes black or glitchy windows. | `--gpu-rendering` |
 | `--fix-zoom` | Keeps the in-game zoom when the window is minimized or moved to another desktop. | `--no-fix-zoom` |
+| `--nvidia` | On laptops with Intel and NVIDIA graphics: renders on the NVIDIA GPU, with GPU rendering and [DXVK](https://github.com/doitsujin/dxvk) instead of Wine's slower OpenGL translation. Steadier frame rate. Cannot be combined with `--cpu-rendering`. | `--no-nvidia` |
 
 Options can be combined and added later, for example:
 
 ```bash
 ./install.sh --cpu-rendering --fix-zoom
 ```
+
+Sanalika runs at 24 frames per second by design: both the client and the game code set that limit, on Windows too. These options make it hold that rate more steadily; none of them raise it.
+
+### About the NVIDIA option
+
+Sanalika renders with Direct3D 11. By default Wine translates that to OpenGL on the GPU that drives the screen, which on most laptops is the slower Intel one. `--nvidia` installs DXVK 2.7.1, which translates Direct3D 11 to Vulkan, into Sanalika's own Wine prefix only (other Wine programs are not affected), and starts the game with NVIDIA PRIME render offload, the same way GNOME's "Launch using Discrete Graphics" does. DXVK is downloaded once from its official release, checked against a known hash, and cached in `~/.cache/sanalika-linux`. Wine's own DLLs are kept and put back by `--no-nvidia`.
 
 ### About the zoom fix
 
@@ -53,6 +60,7 @@ The patch is built with [JPEXS Free Flash Decompiler](https://github.com/jindrap
 
 ## Troubleshooting
 
+- **Low or uneven frame rate on a laptop with NVIDIA graphics:** `./install.sh --nvidia`.
 - **Black, flickering, or glitchy game window:** `./install.sh --cpu-rendering`.
 - **In-game zoom resets after switching desktops:** `./install.sh --fix-zoom`.
 - **Launcher or menu entry missing:** run `./install.sh` again.
@@ -61,7 +69,7 @@ The patch is built with [JPEXS Free Flash Decompiler](https://github.com/jindrap
 ## Uninstalling
 
 ```bash
-./uninstall.sh          # remove the launcher, menu entry, and saved options; undo the zoom fix
+./uninstall.sh          # remove the launcher, menu entry, and saved options; undo the zoom fix and DXVK
 ./uninstall.sh --purge  # also remove the Wine prefix, game files, settings, and leftover menu entries
 ```
 
@@ -75,4 +83,4 @@ Tested on Fedora (GNOME on Wayland) with Sanalika client `1.0.2.6`. The installe
 
 Sanalika and its game files belong to their respective owners. This is an independent compatibility project and is not affiliated with or endorsed by Sanalika. Use the official installer and comply with its terms. The optional zoom fix modifies your local copy of the client; it is off by default.
 
-JPEXS Free Flash Decompiler is only downloaded when `--fix-zoom` is used and remains subject to its own license.
+JPEXS Free Flash Decompiler is only downloaded when `--fix-zoom` is used, and DXVK only when `--nvidia` is used. Both remain subject to their own licenses.

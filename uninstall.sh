@@ -24,6 +24,18 @@ if [[ "$purge" -eq 0 && -f "$helper_dir/zoom.state" ]]; then
     done
 fi
 
+# Put Wine's own Direct3D DLLs back if --nvidia installed DXVK.
+if [[ "$purge" -eq 0 ]]; then
+    for dll in d3d11 dxgi d3d10core; do
+        if [[ -e "$prefix/drive_c/windows/syswow64/$dll.dll.wine" ]]; then
+            mv -f -- "$prefix/drive_c/windows/syswow64/$dll.dll.wine" "$prefix/drive_c/windows/syswow64/$dll.dll"
+            WINEPREFIX="$prefix" wine reg delete 'HKCU\Software\Wine\DllOverrides' /v "$dll" /f >/dev/null 2>&1 || true
+            dxvk_removed=1
+        fi
+    done
+    [[ -z "${dxvk_removed:-}" ]] || printf 'DXVK removed.\n'
+fi
+
 rm -f -- "$user_home/.local/bin/sanalika-linux" "$user_home/.local/share/applications/sanalika-linux.desktop"
 rm -rf -- "$helper_dir"
 printf 'Launcher removed.\n'
